@@ -351,9 +351,7 @@ function applyFilters() {
 
 function getFilteredData() {
   const p = document.getElementById("searchProvider").value;
-  const s = [...document.getElementById("searchStatus").selectedOptions]
-    .map(o => o.value)
-    .filter(Boolean);
+  const s = [...document.getElementById("searchStatus").selectedOptions].map(o => o.value);
 
   return allData.filter(c => {
     const prov = clean(c.provider);
@@ -541,41 +539,6 @@ function fill(id, values) {
     o.textContent = v;
     el.appendChild(o);
   });
-}
-
-function applyMobileStatusSelectMode() {
-  const status = document.getElementById("searchStatus");
-  if (!status) return;
-
-  const isMobile = window.matchMedia("(max-width: 768px)").matches;
-  const allOptionLabel = "Все статусы";
-
-  if (isMobile) {
-    status.removeAttribute("multiple");
-    status.size = 1;
-
-    const hasAllOption = [...status.options].some(o => o.value === "");
-    if (!hasAllOption) {
-      const allOption = document.createElement("option");
-      allOption.value = "";
-      allOption.textContent = allOptionLabel;
-      status.insertBefore(allOption, status.firstChild);
-    }
-
-    if (![...status.selectedOptions].length) {
-      status.value = "";
-    }
-    return;
-  }
-
-  status.setAttribute("multiple", "multiple");
-  status.size = 4;
-
-  const allOption = [...status.options].find(o => o.value === "");
-  if (allOption) {
-    allOption.selected = false;
-    status.removeChild(allOption);
-  }
 }
 
 // --- Мобильные улучшения ---
@@ -976,7 +939,6 @@ map.on("click", function (e) {
 const statusSelect = document.getElementById("searchStatus");
 if (statusSelect) {
   statusSelect.addEventListener("mousedown", function (e) {
-    if (!statusSelect.multiple) return;
     e.preventDefault();
     if (e.target.tagName !== "OPTION") return;
     e.target.selected = !e.target.selected;
@@ -986,5 +948,3 @@ if (statusSelect) {
 
 bindMobileStatusStrip();
 updateMobileStatusStripUI();
-applyMobileStatusSelectMode();
-window.addEventListener("resize", applyMobileStatusSelectMode);
