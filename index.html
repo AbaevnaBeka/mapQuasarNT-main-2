@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#007bff" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='50' fill='%23007bff'/><text x='50' y='55' text-anchor='middle' fill='white' font-size='40'>🗺️</text></svg>" />
+  <title>Карта клиентов</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <!-- Marker Cluster -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+
+  <!-- Твои стили -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <header class="mobile-header">
+    <div class="mobile-header-title">Карта клиентов</div>
+    <div class="mobile-header-actions">
+      <button class="icon-btn" aria-label="Фильтры" onclick="toggleLeftPanel()">⚙️</button>
+      <button class="icon-btn" aria-label="Сбросить фильтры" onclick="resetFilters()">↺</button>
+    </div>
+  </header>
+
+  <div class="mobile-status-strip" id="mobileStatusStrip" aria-label="Фильтр статусов">
+    <button class="status-chip active" data-mobile-status="all">Все</button>
+    <button class="status-chip" data-mobile-status="подключен">Подключен</button>
+    <button class="status-chip" data-mobile-status="отключен">Отключен</button>
+    <button class="status-chip" data-mobile-status="есть возможность подключения">Есть возможность подключения</button>
+    <button class="status-chip" data-mobile-status="идет подключение">Идет подключение</button>
+  </div>
+
+  <!-- Модальное окно для информации о клиенте -->
+  <div id="clientModal" class="modal">
+    <div class="modal-content">
+      <span class="modal-close" onclick="closeClientModal()">&times;</span>
+      <div id="modalClientInfo"></div>
+    </div>
+  </div>
+
+  <!-- Мобильное меню -->
+  <div class="mobile-menu">
+    <button onclick="setTab('map')" class="tab-btn active" id="tabMap">
+      <span class="tab-btn-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" class="tab-icon-svg tab-icon-map" focusable="false">
+          <path d="M3 6.5L8.5 4l7 2.5L21 4v13.5L15.5 20l-7-2.5L3 20V6.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+          <path d="M8.5 4v13.5M15.5 6.5V20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+        </svg>
+      </span>
+      <span class="tab-btn-label">Карта</span>
+    </button>
+    <button onclick="setTab('clients')" class="tab-btn" id="tabClients">
+      <span class="tab-btn-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" class="tab-icon-svg tab-icon-users" focusable="false">
+          <circle cx="9" cy="8" r="2.6" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+          <circle cx="15.5" cy="9" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+          <path d="M4.5 18c.5-2.6 2.3-4 4.5-4s4 1.4 4.5 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+          <path d="M12.5 18c.4-1.9 1.8-3 3.5-3 1.6 0 3 1 3.4 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+        </svg>
+      </span>
+      <span class="tab-btn-label">Клиенты</span>
+    </button>
+  </div>
+
+  <!-- Левая панель -->
+  <div class="left-panel" id="leftPanel">
+    <div class="overlay" onclick="toggleLeftPanel()"></div>
+    <div class="panel-content">
+      <button class="collapse-btn" onclick="toggleCollapse('leftPanel')">⮜</button>
+      <button class="close-btn" onclick="toggleLeftPanel()">✕</button>
+      <h3>🔍 Поиск клиента</h3>
+      <input id="searchClient" placeholder="Введите клиента или адрес" oninput="searchClientList()" />
+      <div id="clientList"></div>
+
+      <h3>🏢 Провайдер</h3>
+      <select id="searchProvider" onchange="applyFilters()">
+        <option value="">Все</option>
+      </select>
+
+      <h3>📶 Статус</h3>
+      <select id="searchStatus" multiple size="4"></select>
+
+      <button onclick="resetFilters()">Сбросить</button>
+      <button onclick="resetAll()">🧹 Очистить и вернуть карту</button>
+
+      <h3>📍 Новый адрес</h3>
+      <input
+        id="newAddress"
+        placeholder="Введите адрес или координаты"
+        onkeydown="if(event.key==='Enter') findAddress()"
+      />
+      <button onclick="findAddress()">Найти</button>
+    </div>
+  </div>
+
+  <!-- Правая панель -->
+  <div class="right-panel" id="rightPanel">
+    <div class="overlay" onclick="toggleRightPanel()"></div>
+    <div class="panel-content">
+      <button class="collapse-btn" onclick="toggleCollapse('rightPanel')">⮞</button>
+      <h3>🥧 Диаграмма</h3>
+      <canvas id="chart"></canvas>
+
+      <div id="statusButtons"></div>
+
+      <button onclick="toggleRightStats()" id="toggleRightStatsBtn">
+        📊 Показать статистику
+      </button>
+
+      <div id="rightStats" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Карта -->
+  <div id="map"></div>
+  <div class="panel-fallback">
+    <button onclick="toggleLeftPanel()">⚙️ Фильтры</button>
+    <button onclick="toggleRightPanel()">📊 Диаграмма</button>
+  </div>
+
+  <!-- Вкладка Клиенты -->
+  <div id="clientsTab" class="tab-content" style="display:none;">
+    <div class="clients-list">
+      <h3>👥 Список клиентов</h3>
+      <input id="mobileSearch" placeholder="Поиск по имени или адресу" oninput="filterClients()" />
+      <div id="clientsSummary" class="clients-summary"></div>
+      <div id="clientsContainer"></div>
+    </div>
+  </div>
+
+  <div id="bottomSheet" class="bottom-sheet" aria-hidden="true">
+    <div class="bottom-sheet-overlay" onclick="closeBottomSheet()"></div>
+    <div class="bottom-sheet-card" role="dialog" aria-modal="true">
+      <div class="sheet-handle"></div>
+      <button class="sheet-close" onclick="closeBottomSheet()" aria-label="Закрыть">✕</button>
+      <div id="bottomSheetContent"></div>
+    </div>
+  </div>
+
+  <!-- Скрипты -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Твой JS -->
+  <script src="script.js"></script>
+
+</body>
+</html>
