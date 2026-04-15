@@ -1,4 +1,4 @@
-/* =========================
+* =========================
    ⚙️ НАСТРОЙКИ
 ========================= */
 const defaultView = [51, 71];
@@ -26,6 +26,9 @@ let chart;
 let searchMarker = null;
 let activeClientMarker = null;
 const markerByKey = new Map();
+let clientSearchDebounceTimer = null;
+let mobileSearchDebounceTimer = null;
+let pendingMobileScrollToFirst = false;
 
 /* =========================
    🎨 ЦВЕТА
@@ -87,6 +90,335 @@ fetch(url)
 ========================= */
 function clean(str) {
   return (str || "").toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+const searchSynonyms = {
+  "казахтелеком": "kazakhtelecom",
+  "kazakhtelecom": "kazakhtelecom",
+  "астана": "astana",
+  "astana": "astana"
+};
+
+const keyboardLayoutMap = {
+  q: "й", w: "ц", e: "у", r: "к", t: "е", y: "н", u: "г", i: "ш", o: "щ", p: "з",
+  "[": "х", "]": "ъ", a: "ф", s: "ы", d: "в", f: "а", g: "п", h: "р", j: "о", k: "л",
+  l: "д", ";": "ж", "'": "э", z: "я", x: "ч", c: "с", v: "м", b: "и", n: "т", m: "ь",
+  ",": "б", ".": "ю",
+  й: "q", ц: "w", у: "e", к: "r", е: "t", н: "y", г: "u", ш: "i", щ: "o", з: "p",
+  х: "[", ъ: "]", ф: "a", ы: "s", в: "d", а: "f", п: "g", р: "h", о: "j", л: "k",
+  д: "l", ж: ";", э: "'", я: "z", ч: "x", с: "c", м: "v", и: "b", т: "n", ь: "m",
+  б: ",", ю: "."
+};
+
+function remapKeyboardLayout(str) {
+  return String(str || "")
+    .split("")
+    .map(char => keyboardLayoutMap[char] || char)
+    .join("");
+}
+
+function buildAddressQueryVariants(query) {
+  const base = String(query || "").trim();
+  const remapped = remapKeyboardLayout(base);
+  const normalizedBase = base.replace(/\s+/g, " ").trim();
+  const normalizedRemapped = remapped.replace(/\s+/g, " ").trim();
+
+  return [
+    ...new Map(
+      [
+        { value: base, reason: "exact" },
+        { value: remapped, reason: remapped && remapped !== base ? "layout" : "exact" },
+        { value: normalizedBase, reason: "exact" },
+        { value: normalizedRemapped, reason: normalizedRemapped && normalizedRemapped !== normalizedBase ? "layout" : "exact" }
+      ]
+        .filter(item => item.value)
+        .map(item => [item.value, item])
+    ).values()
+  ];
+}
+
+function updateAddressSearchHint(original, suggestion, reason) {
+  const hint = document.getElementById("newAddressHint");
+  if (!hint) return;
+
+  if (!suggestion || suggestion === original || reason === "exact") {
+    hint.textContent = "";
+    hint.style.display = "none";
+    hint.onclick = null;
+    return;
+  }
+
+  hint.innerHTML = `Возможно, вы имели в виду: <button type="button" class="search-hint-action">${suggestion}</button>`;
+  hint.style.display = "block";
+  hint.onclick = function (event) {
+    const action = event.target.closest(".search-hint-action");
+    if (!action) return;
+    const input = document.getElementById("newAddress");
+    if (!input) return;
+    input.value = suggestion;
+    updateAddressSearchHint(suggestion, "", "exact");
+    findAddress();
+  };
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getHighlightTerms(query) {
+  const variants = buildQueryVariants(query);
+  return [...new Set(
+    variants
+      .flatMap(item => item.value.split(" "))
+      .filter(token => token && token.length >= 2)
+  )];
+}
+
+function highlightText(value, query) {
+  const source = String(value || "");
+  if (!source) return "";
+
+  const terms = getHighlightTerms(query).sort((a, b) => b.length - a.length);
+  if (!terms.length) return escapeHtml(source);
+
+  const pattern = new RegExp(`(${terms.map(escapeRegExp).join("|")})`, "ig");
+  return escapeHtml(source).replace(pattern, "<mark>$1</mark>");
+}
+
+function normalizeSearchText(str) {
+  return clean(str)
+    .replace(/[.,/#!$%^&*;:{}=\-_`~()\\[\]+"]/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map(token => searchSynonyms[token] || token)
+    .join(" ");
+}
+
+function getSearchableFields(client) {
+  return {
+    name: normalizeSearchText(client.name),
+    address: normalizeSearchText(client.address),
+    provider: normalizeSearchText(client.provider),
+    city: normalizeSearchText(client.city)
+  };
+}
+
+function buildQueryVariants(query) {
+  const base = normalizeSearchText(query);
+  const remapped = normalizeSearchText(remapKeyboardLayout(clean(query)));
+  return [
+    ...new Map(
+      [
+        { value: base, reason: "exact" },
+        { value: remapped, reason: remapped && remapped !== base ? "layout" : "exact" }
+      ]
+        .filter(item => item.value)
+        .map(item => [item.value, item])
+    ).values()
+  ];
+}
+
+function levenshteinDistance(a, b, maxDistance = 2) {
+  if (a === b) return 0;
+  if (!a || !b) return Math.max(a.length, b.length);
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  const curr = new Array(b.length + 1);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    let minInRow = curr[0];
+
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost
+      );
+      if (curr[j] < minInRow) minInRow = curr[j];
+    }
+
+    if (minInRow > maxDistance) return maxDistance + 1;
+
+    for (let j = 0; j <= b.length; j += 1) {
+      prev[j] = curr[j];
+    }
+  }
+
+  return prev[b.length];
+}
+
+function getBestTokenDistance(queryTokens, fieldTokens) {
+  let totalDistance = 0;
+  let matchedTokens = 0;
+
+  queryTokens.forEach(queryToken => {
+    let best = Infinity;
+    fieldTokens.forEach(fieldToken => {
+      const distance = levenshteinDistance(queryToken, fieldToken, 2);
+      if (distance < best) best = distance;
+    });
+
+    if (best <= 2) {
+      totalDistance += best;
+      matchedTokens += 1;
+    }
+  });
+
+  return {
+    matchedTokens,
+    averageDistance: matchedTokens ? totalDistance / matchedTokens : Infinity
+  };
+}
+
+function scoreSearchField(value, query, boost) {
+  if (!value) return 0;
+
+  let score = 0;
+  const queryTokens = query.split(" ").filter(Boolean);
+  const fieldTokens = value.split(" ").filter(Boolean);
+
+  if (value === query) score += 120 * boost;
+  if (value.startsWith(query)) score += 90 * boost;
+  if (value.includes(query)) score += 55 * boost;
+
+  queryTokens.forEach(token => {
+    if (token.length < 2) return;
+
+    fieldTokens.forEach(fieldToken => {
+      if (fieldToken === token) score += 42 * boost;
+      else if (fieldToken.startsWith(token)) score += 24 * boost;
+    });
+  });
+
+  return score;
+}
+
+function scoreFuzzyField(value, query, boost) {
+  if (!value) return 0;
+
+  const queryTokens = query.split(" ").filter(Boolean);
+  const fieldTokens = value.split(" ").filter(Boolean);
+  if (!queryTokens.length || !fieldTokens.length) return 0;
+
+  const { matchedTokens, averageDistance } = getBestTokenDistance(queryTokens, fieldTokens);
+  if (!matchedTokens) return 0;
+
+  const coverage = matchedTokens / queryTokens.length;
+  if (coverage < 0.6 || averageDistance > 2) return 0;
+
+  return ((22 - averageDistance * 6) * coverage) * boost;
+}
+
+function scoreTokenOrder(value, query, boost) {
+  if (!value || !query) return 0;
+  const compactValue = value.replace(/\s+/g, " ");
+  const compactQuery = query.replace(/\s+/g, " ");
+  return compactValue.includes(compactQuery) ? 16 * boost : 0;
+}
+
+function searchClients(query, dataset = allData) {
+  const queryVariants = buildQueryVariants(query);
+  if (!queryVariants.length) {
+    return { items: [], suggestion: null };
+  }
+
+  const exactMatches = [];
+  const fuzzyMatches = [];
+  let suggestion = null;
+
+  dataset.forEach(client => {
+    const fields = getSearchableFields(client);
+    let bestExactScore = 0;
+    let bestFuzzyScore = 0;
+    let bestReason = "exact";
+    let bestVariant = queryVariants[0]?.value || "";
+
+    queryVariants.forEach(({ value: variant, reason }) => {
+      const exactScore =
+        scoreSearchField(fields.address, variant, 4) +
+        scoreSearchField(fields.provider, variant, 3) +
+        scoreSearchField(fields.city, variant, 2) +
+        scoreSearchField(fields.name, variant, 2) +
+        scoreTokenOrder(fields.address, variant, 3) +
+        scoreTokenOrder(fields.city, variant, 2) +
+        scoreTokenOrder(fields.provider, variant, 2);
+
+      if (exactScore > bestExactScore) {
+        bestExactScore = exactScore;
+        bestReason = reason;
+        bestVariant = variant;
+      }
+
+      const fuzzyScore =
+        scoreFuzzyField(fields.address, variant, 4) +
+        scoreFuzzyField(fields.provider, variant, 3) +
+        scoreFuzzyField(fields.city, variant, 2) +
+        scoreFuzzyField(fields.name, variant, 2);
+
+      if (fuzzyScore > bestFuzzyScore) {
+        bestFuzzyScore = fuzzyScore;
+        if (fuzzyScore > bestExactScore) {
+          bestReason = reason === "layout" ? "layout" : "typo";
+          bestVariant = variant;
+        }
+      }
+    });
+
+    if (bestExactScore > 0) {
+      exactMatches.push({ client, score: bestExactScore, reason: bestReason, variant: bestVariant });
+      return;
+    }
+
+    if (bestFuzzyScore > 0) {
+      fuzzyMatches.push({ client, score: bestFuzzyScore, reason: bestReason === "layout" ? "layout" : "typo", variant: bestVariant });
+    }
+  });
+
+  const primaryResults = exactMatches
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+
+  if (primaryResults.length && primaryResults[0].reason !== "exact") {
+    suggestion = {
+      type: primaryResults[0].reason,
+      text: primaryResults[0].variant
+    };
+  }
+
+  if (primaryResults.length >= 5) {
+    return {
+      items: primaryResults.map(entry => entry.client),
+      suggestion
+    };
+  }
+
+  const fallbackResults = fuzzyMatches
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(0, 10 - primaryResults.length));
+
+  if (!suggestion && fallbackResults.length && fallbackResults[0].reason !== "exact") {
+    suggestion = {
+      type: fallbackResults[0].reason,
+      text: fallbackResults[0].variant
+    };
+  }
+
+  return {
+    items: [...primaryResults, ...fallbackResults].map(entry => entry.client),
+    suggestion
+  };
 }
 
 function getDistance(lat1, lon1, lat2, lon2) {
@@ -309,23 +641,42 @@ function createStatusButtons(data) {
    🔍 ПОИСК
 ========================= */
 function searchClientList() {
-  const v = clean(document.getElementById("searchClient").value);
+  clearTimeout(clientSearchDebounceTimer);
+  clientSearchDebounceTimer = setTimeout(runClientSearchList, 180);
+}
+
+function runClientSearchList() {
+  const v = document.getElementById("searchClient").value;
   const list = document.getElementById("clientList");
 
   list.innerHTML = "";
-  if (!v) return;
+  if (!v.trim()) return;
 
-  allData.filter(c =>
-    clean(c.name).includes(v) ||
-    clean(c.address).includes(v)
-  ).slice(0, 10)
-    .forEach(c => {
-      const d = document.createElement("div");
-      d.className = "suggestion";
-      d.innerHTML = `<b>${c.name}</b><br><small>${c.address}</small>`;
-      d.onclick = () => selectSuggestion(c);
-      list.appendChild(d);
-    });
+  const result = searchClients(v);
+
+  if (result.suggestion && normalizeSearchText(v) !== result.suggestion.text) {
+    const suggestion = document.createElement("div");
+    suggestion.className = "search-hint";
+    suggestion.innerHTML = `Возможно, вы имели в виду: <button type="button" class="search-hint-action">${result.suggestion.text}</button>`;
+    suggestion.onclick = function (event) {
+      const action = event.target.closest(".search-hint-action");
+      if (!action) return;
+      const input = document.getElementById("searchClient");
+      if (!input) return;
+      input.value = result.suggestion.text;
+      runClientSearchList();
+    };
+    list.appendChild(suggestion);
+  }
+
+  result.items.forEach(c => {
+    const parts = [c.address, c.city, c.provider].filter(Boolean);
+    const d = document.createElement("div");
+    d.className = "suggestion";
+    d.innerHTML = `<b>${highlightText(c.name || "Клиент", v)}</b><br><small>${parts.map(part => highlightText(part, v)).join(" • ")}</small>`;
+    d.onclick = () => selectSuggestion(c);
+    list.appendChild(d);
+  });
 }
 
 function selectSuggestion(c) {
@@ -638,18 +989,8 @@ function enableBottomSheetSwipeClose() {
 
 // Автоскролл к найденному клиенту и быстрый сброс поиска
 if (document.getElementById('mobileSearch')) {
-  document.getElementById('mobileSearch').addEventListener('input', function(e) {
-    const query = this.value.trim().toLowerCase();
-    const cards = document.querySelectorAll('.client-card');
-    let firstMatch = null;
-    cards.forEach(card => {
-      const text = card.textContent.toLowerCase();
-      const match = text.includes(query);
-      card.style.display = match ? 'block' : 'none';
-      if (match && !firstMatch) firstMatch = card;
-    });
-    if (firstMatch) firstMatch.scrollIntoView({behavior: 'smooth', block: 'center'});
-    if (!query) cards.forEach(card => card.style.display = 'block');
+  document.getElementById('mobileSearch').addEventListener('input', function() {
+    filterClients(true);
   });
 }
 
@@ -722,6 +1063,7 @@ window.populateClients = function() {
   const container = document.getElementById('clientsContainer');
   if (!container) return;
   container.innerHTML = '';
+  const mobileQuery = document.getElementById("mobileSearch")?.value || "";
   const filteredClients = getFilteredData()
     .filter(c => allowedMobileClientStatuses.has(clean(c.status)))
     .filter(c => clean(c.status) !== "есть возможность подключения")
@@ -731,9 +1073,9 @@ window.populateClients = function() {
     const div = document.createElement('div');
     div.className = 'client-card';
     div.innerHTML = `
-      <h4>${c.name}</h4>
-      <p>📍 ${c.address || 'Адрес не указан'}</p>
-      <p>📡 ${c.provider || 'Провайдер не указан'}</p>
+      <h4>${highlightText(c.name, mobileQuery)}</h4>
+      <p>📍 ${highlightText(c.address || 'Адрес не указан', mobileQuery)}</p>
+      <p>📡 ${highlightText(c.provider || 'Провайдер не указан', mobileQuery)}</p>
       <p>📶 <span style="color:${statusColors[clean(c.status)] || '#999'}">${c.status}</span></p>
     `;
     div.onclick = () => {
@@ -805,15 +1147,89 @@ function setTab(tab) {
   }
 }
 
-function filterClients() {
+function filterClients(scrollToFirst = false) {
+  pendingMobileScrollToFirst = pendingMobileScrollToFirst || scrollToFirst;
+  clearTimeout(mobileSearchDebounceTimer);
+  mobileSearchDebounceTimer = setTimeout(runMobileFilterClients, 180);
+}
+
+function runMobileFilterClients() {
   const input = document.getElementById("mobileSearch");
   if (!input) return;
-  const query = clean(input.value);
+  const query = input.value.trim();
+  const hint = document.getElementById("mobileSearchHint");
   const cards = document.querySelectorAll(".client-card");
+
+  if (!query) {
+    if (hint) {
+      hint.textContent = "";
+      hint.style.display = "none";
+      hint.onclick = null;
+    }
+    cards.forEach(card => {
+      card.style.display = "block";
+    });
+    pendingMobileScrollToFirst = false;
+    return;
+  }
+
+  const filteredClients = getFilteredData()
+    .filter(c => allowedMobileClientStatuses.has(clean(c.status)))
+    .filter(c => clean(c.status) !== "есть возможность подключения");
+  const result = searchClients(query, filteredClients);
+  const matchedClients = result.items;
+
+  if (hint) {
+    if (result.suggestion && normalizeSearchText(query) !== result.suggestion.text) {
+      hint.innerHTML = `Возможно, вы имели в виду: <button type="button" class="search-hint-action">${result.suggestion.text}</button>`;
+      hint.style.display = "block";
+      hint.onclick = function (event) {
+        const action = event.target.closest(".search-hint-action");
+        if (!action || !input) return;
+        input.value = result.suggestion.text;
+        filterClients(true);
+      };
+    } else {
+      hint.textContent = "";
+      hint.style.display = "none";
+      hint.onclick = null;
+    }
+  }
+
+  const visibleKeys = new Set(
+    matchedClients.map(client => {
+      const lat = parseFloat((client.lat + "").replace(',', '.'));
+      const lng = parseFloat((client.lng + "").replace(',', '.'));
+      if (!isNaN(lat) && !isNaN(lng)) return getClientKey(lat, lng);
+      return `${clean(client.name)}|${clean(client.address)}|${clean(client.provider)}`;
+    })
+  );
+
   cards.forEach(card => {
-    const text = clean(card.textContent || "");
-    card.style.display = text.includes(query) ? "block" : "none";
+    const idx = Number(card.getAttribute("data-idx"));
+    const client = filteredClients[idx];
+    if (!client) {
+      card.style.display = "none";
+      return;
+    }
+
+    const lat = parseFloat((client.lat + "").replace(',', '.'));
+    const lng = parseFloat((client.lng + "").replace(',', '.'));
+    const key = !isNaN(lat) && !isNaN(lng)
+      ? getClientKey(lat, lng)
+      : `${clean(client.name)}|${clean(client.address)}|${clean(client.provider)}`;
+
+    card.style.display = visibleKeys.has(key) ? "block" : "none";
   });
+
+  if (pendingMobileScrollToFirst) {
+    const firstMatch = [...document.querySelectorAll('.client-card')]
+      .find(card => card.style.display !== 'none');
+    if (firstMatch) {
+      firstMatch.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
+  }
+  pendingMobileScrollToFirst = false;
 }
 
 function toggleRightStats() {
@@ -864,6 +1280,7 @@ function findAddress() {
   if (!input) return;
   const value = input.value.trim();
   if (!value) return;
+  updateAddressSearchHint(value, "", "exact");
 
   const match = value.match(/^(-?\d+(\.\d+)?)[,\s]+(-?\d+(\.\d+)?)$/);
   if (match) {
@@ -886,26 +1303,50 @@ function findAddress() {
     return;
   }
 
-  fetch("https://nominatim.openstreetmap.org/search?format=json&q=" + encodeURIComponent(value))
-    .then(r => r.json())
-    .then(d => {
-      if (!d || !d.length) {
-        alert("Не найдено");
-        return;
+  const queryVariants = buildAddressQueryVariants(value);
+
+  (async function () {
+    let found = null;
+    let usedQuery = value;
+    let usedReason = "exact";
+
+    for (const variant of queryVariants) {
+      const response = await fetch("https://nominatim.openstreetmap.org/search?format=json&q=" + encodeURIComponent(variant.value));
+      const data = await response.json();
+      if (data && data.length) {
+        found = data;
+        usedQuery = variant.value;
+        usedReason = variant.reason;
+        break;
       }
-      if (searchMarker) map.removeLayer(searchMarker);
-      const lat = parseFloat(d[0].lat);
-      const lon = parseFloat(d[0].lon);
-      const providers = findNearestProviders(lat, lon);
+    }
 
-      let html = `<b>📍 Адрес</b><br>${value}<br><br><b>📌 Координаты:</b><br>${lat}, ${lon}<br><br>`;
-      providers.forEach((p, i) => {
-        html += `${i + 1}. 📡 <b>${p.provider}</b><br>📏 ~${p.distance.toFixed(2)} км<br><br>`;
-      });
+    if (!found || !found.length) {
+      updateAddressSearchHint(value, "", "exact");
+      alert("Не найдено");
+      return;
+    }
 
-      map.flyTo([lat, lon], 15, { duration: 1.5 });
-      searchMarker = L.marker([lat, lon]).addTo(map).bindPopup(html).openPopup();
+    updateAddressSearchHint(value, usedQuery, usedReason);
+
+    if (searchMarker) map.removeLayer(searchMarker);
+    const lat = parseFloat(found[0].lat);
+    const lon = parseFloat(found[0].lon);
+    const providers = findNearestProviders(lat, lon);
+
+    let html = `<b>📍 Адрес</b><br>${usedQuery}<br><br><b>📌 Координаты:</b><br>${lat}, ${lon}<br><br>`;
+    if (usedQuery !== value) {
+      html += `<b>⌨️ Исправлена раскладка:</b><br>${value} → ${usedQuery}<br><br>`;
+    }
+    providers.forEach((p, i) => {
+      html += `${i + 1}. 📡 <b>${p.provider}</b><br>📏 ~${p.distance.toFixed(2)} км<br><br>`;
     });
+
+    map.flyTo([lat, lon], 15, { duration: 1.5 });
+    searchMarker = L.marker([lat, lon]).addTo(map).bindPopup(html).openPopup();
+  })().catch(() => {
+    alert("Не найдено");
+  });
 }
 
 function closeClientModal() {
