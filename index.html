@@ -98,6 +98,7 @@
         placeholder="Введите адрес или координаты"
         onkeydown="if(event.key==='Enter') findAddress()"
       />
+      <div id="newAddressHint" class="search-hint" style="display:none;"></div>
       <button onclick="findAddress()">Найти</button>
     </div>
   </div>
@@ -132,6 +133,7 @@
     <div class="clients-list">
       <h3>👥 Список клиентов</h3>
       <input id="mobileSearch" placeholder="Поиск по имени или адресу" oninput="filterClients()" />
+      <div id="mobileSearchHint" class="search-hint" style="display:none;"></div>
       <div id="clientsSummary" class="clients-summary"></div>
       <div id="clientsContainer"></div>
     </div>
